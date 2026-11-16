@@ -2555,17 +2555,19 @@ const DEFAULT_SETTINGS = {
 };
 
 // Timezone-safe local date helpers (avoids UTC offset shifts on local dates)
-function getLocalYearMonth(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  return ${y}-;
+function getLocalYearMonth(d) {
+  const dateObj = d || new Date();
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  return y + '-' + m;
 }
 
-function getLocalDateString(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return ${y}--;
+function getLocalDateString(d) {
+  const dateObj = d || new Date();
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
 }
 
 // ================= APP STATE =================
