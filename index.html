@@ -610,8 +610,10 @@ html, body {
 }
 
 .ios-icon-btn-sm {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
   border-radius: 50%;
   background: var(--bg-tertiary);
   border: 1px solid var(--glass-border);
@@ -2552,6 +2554,20 @@ const DEFAULT_SETTINGS = {
   theme: 'theme-dark'
 };
 
+// Timezone-safe local date helpers (avoids UTC offset shifts on local dates)
+function getLocalYearMonth(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return ${y}-;
+}
+
+function getLocalDateString(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return ${y}--;
+}
+
 // ================= APP STATE =================
 let state = {
   accounts: [],
@@ -2559,7 +2575,7 @@ let state = {
   transactions: [],
   settings: { ...DEFAULT_SETTINGS },
   currentView: 'dashboard',
-  selectedTxMonth: new Date().toISOString().slice(0, 7), // YYYY-MM
+  selectedTxMonth: getLocalYearMonth(), // YYYY-MM
   timeMode: 'auto', // 'auto' | 'manual'
   timeAutoInterval: null,
   activeTxSegment: 'all'
@@ -2738,7 +2754,7 @@ function handleExcelImport(event) {
           // Specified by user: "Period has only date in it and for that time put 9 am only"
           datetimeStr = `${y}-${m}-${d}T09:00`;
         } else {
-          const today = new Date().toISOString().slice(0, 10);
+          const today = getLocalDateString();
           datetimeStr = `${today}T09:00`;
         }
 
@@ -2918,7 +2934,7 @@ function renderDashboard() {
   document.getElementById('dashboard-total-balance').textContent = formatCurrency(totalBalance);
 
   // 2. Calculate This Month's Income & Expense
-  const currentMonth = new Date().toISOString().slice(0, 7);
+  const currentMonth = getLocalYearMonth();
   let monthIncome = 0;
   let monthExpense = 0;
 
@@ -3069,7 +3085,7 @@ function updateMonthPickerUI() {
   const cur = new Date();
   for (let i = -12; i <= 6; i++) {
     const d = new Date(cur.getFullYear(), cur.getMonth() + i, 1);
-    const val = d.toISOString().slice(0, 7);
+    const val = getLocalYearMonth(d);
     const opt = document.createElement('option');
     opt.value = val;
     opt.textContent = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
@@ -3180,10 +3196,10 @@ function renderDateGroupedTransactions() {
     groupsByDate[dateKey].push(tx);
   });
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getLocalDateString(new Date());
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+  const yesterdayStr = getLocalDateString(yesterday);
 
   // Render each date group
   Object.keys(groupsByDate).forEach(dateKey => {
@@ -3691,11 +3707,11 @@ function getFilteredExportTransactions() {
     const tDate = new Date(t.datetime);
 
     if (timeline === 'current-month') {
-      const curMonthStr = now.toISOString().slice(0, 7);
+      const curMonthStr = getLocalYearMonth(now);
       return t.datetime.startsWith(curMonthStr);
     } else if (timeline === 'last-month') {
       const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const prevMonthStr = prevDate.toISOString().slice(0, 7);
+      const prevMonthStr = getLocalYearMonth(prevDate);
       return t.datetime.startsWith(prevMonthStr);
     } else if (timeline === 'last-3-months') {
       const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
@@ -4004,7 +4020,7 @@ function renderMonthlyTrendChart() {
   const cur = new Date();
   for (let i = 5; i >= 0; i--) {
     const d = new Date(cur.getFullYear(), cur.getMonth() - i, 1);
-    months.push(d.toISOString().slice(0, 7));
+    months.push(getLocalYearMonth(d));
   }
 
   const incomeData = [];
@@ -4577,8 +4593,8 @@ function switchView(viewName) {
 
 function changeMonth(delta) {
   const [year, month] = state.selectedTxMonth.split('-');
-  const newDate = new Date(parseInt(year), parseInt(month) - 1 + delta, 1);
-  state.selectedTxMonth = newDate.toISOString().slice(0, 7);
+  const newDate = new Date(parseInt(year, 10), parseInt(month, 10) - 1 + delta, 1);
+  state.selectedTxMonth = getLocalYearMonth(newDate);
   updateMonthPickerUI();
   renderTransactionsView();
   renderStatsView();
