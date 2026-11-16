@@ -1042,6 +1042,21 @@ html, body {
   border-radius: var(--radius-sm);
 }
 
+.account-delete-btn {
+  background: none;
+  border: none;
+  color: var(--accent-expense);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.account-delete-btn:active {
+  background: var(--accent-expense-bg);
+}
+
 .sub-tabs-container {
   display: flex;
   gap: 6px;
@@ -1584,27 +1599,34 @@ html, body {
 }
 
 /* Buttons */
-.ios-btn-primary-large {
-  width: 100%;
-  height: 50px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, #4f46e5, #6366f1);
-  border: none;
-  color: #fff;
-  font-size: 16px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  cursor: pointer;
-  box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
-  transition: transform 0.15s ease;
-  margin-top: 8px;
+.ios-btn-primary-large,
+#submit-tx-btn {
+  width: 100% !important;
+  min-height: 54px !important;
+  height: 54px !important;
+  padding: 14px 20px !important;
+  flex-shrink: 0 !important; /* Prevents flexbox collapsing in Safari/iOS */
+  border-radius: var(--radius-md) !important;
+  background: linear-gradient(135deg, #4f46e5, #6366f1) !important;
+  border: none !important;
+  color: #fff !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  cursor: pointer !important;
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.45) !important;
+  transition: transform 0.15s ease, opacity 0.15s ease !important;
+  margin-top: 14px !important;
+  margin-bottom: 8px !important;
 }
 
-.ios-btn-primary-large:active {
-  transform: scale(0.97);
+.ios-btn-primary-large:active,
+#submit-tx-btn:active {
+  transform: scale(0.97) !important;
+  opacity: 0.9 !important;
 }
 
 .ios-btn-secondary {

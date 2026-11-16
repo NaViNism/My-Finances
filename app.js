@@ -13,7 +13,7 @@ const STORAGE_KEYS = {
 
 const DEFAULT_ACCOUNTS = [
   { id: 'acc_sbi', name: 'Bank Acc 1 (SBI)', type: 'bank', balance: 0.00 },
-  { id: 'acc_bank2', name: 'Bank Acc 2', type: 'bank', balance: 0.00 },
+  { id: 'acc_bank2', name: 'Bank Acc 2 (Equitas)', type: 'bank', balance: 0.00 },
   { id: 'acc_cash', name: 'Cash', type: 'cash', balance: 0.00 }
 ];
 
@@ -76,6 +76,13 @@ function loadStoredData() {
   try {
     const acc = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
     state.accounts = acc ? JSON.parse(acc) : JSON.parse(JSON.stringify(DEFAULT_ACCOUNTS));
+
+    // Ensure Bank Acc 2 is updated to Equitas
+    const bank2 = state.accounts.find(a => a.id === 'acc_bank2');
+    if (bank2 && bank2.name === 'Bank Acc 2') {
+      bank2.name = 'Bank Acc 2 (Equitas)';
+      saveData('accounts');
+    }
 
     const cat = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
     state.categories = cat ? JSON.parse(cat) : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES));
@@ -231,23 +238,37 @@ function handleExcelImport(event) {
           txType = 'expense';
         }
 
-        // 4. Accounts: Account name (SBI, Bank 2, Cash, etc.)
+        // 4. Accounts: Account name (SBI, Equitas / Bank 2, Cash, etc.)
         const accNameRaw = String(getCol('Accounts', 'Account')).trim();
         let targetAccountId = state.accounts[0]?.id || 'acc_sbi';
 
         if (accNameRaw) {
-          let matchAcc = state.accounts.find(a => 
-            a.name.toLowerCase() === accNameRaw.toLowerCase() ||
-            a.name.toLowerCase().includes(accNameRaw.toLowerCase()) ||
-            accNameRaw.toLowerCase().includes(a.name.toLowerCase())
-          );
+          const lower = accNameRaw.toLowerCase();
+          let matchAcc = null;
+
+          // Priority matching for Equitas, SBI, and Cash
+          if (lower.includes('equitas') || lower.includes('bank 2') || lower.includes('bank acc 2') || lower.includes('acc 2')) {
+            matchAcc = state.accounts.find(a => a.id === 'acc_bank2' || a.name.toLowerCase().includes('equitas') || a.name.toLowerCase().includes('bank 2'));
+          } else if (lower.includes('sbi') || lower.includes('bank 1') || lower.includes('bank acc 1') || lower.includes('acc 1')) {
+            matchAcc = state.accounts.find(a => a.id === 'acc_sbi' || a.name.toLowerCase().includes('sbi') || a.name.toLowerCase().includes('bank 1'));
+          } else if (lower.includes('cash')) {
+            matchAcc = state.accounts.find(a => a.id === 'acc_cash' || a.name.toLowerCase().includes('cash'));
+          }
+
+          if (!matchAcc) {
+            matchAcc = state.accounts.find(a => 
+              a.name.toLowerCase() === lower ||
+              a.name.toLowerCase().includes(lower) ||
+              lower.includes(a.name.toLowerCase())
+            );
+          }
 
           if (!matchAcc) {
             const newAccId = 'acc_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
             matchAcc = {
               id: newAccId,
               name: accNameRaw,
-              type: accNameRaw.toLowerCase().includes('cash') ? 'cash' : 'bank',
+              type: lower.includes('cash') ? 'cash' : 'bank',
               balance: 0.00
             };
             state.accounts.push(matchAcc);
@@ -1544,10 +1565,40 @@ function renderSetupAccounts() {
         <strong style="font-size:14px;color:var(--text-main);">${a.name}</strong>
         <span style="font-size:12px;color:var(--text-muted);display:block;margin-top:2px;">${formatCurrency(a.balance)}</span>
       </div>
-      <button class="ios-link-btn" onclick="openAccountEditModal('${a.id}')">Edit</button>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <button class="ios-link-btn" onclick="openAccountEditModal('${a.id}')">Edit</button>
+        <button class="account-delete-btn" onclick="deleteAccount('${a.id}')" title="Delete account">Delete</button>
+      </div>
     `;
     container.appendChild(item);
   });
+}
+
+function deleteAccount(accId) {
+  if (state.accounts.length <= 1) {
+    showToast('You must keep at least one account.');
+    return;
+  }
+
+  const acc = state.accounts.find(a => a.id === accId);
+  if (!acc) return;
+
+  const hasTx = state.transactions.some(t => t.accountId === accId || t.fromAccountId === accId || t.toAccountId === accId);
+
+  if (parseFloat(acc.balance) !== 0 || hasTx) {
+    if (!confirm(`Account "${acc.name}" has balance ${formatCurrency(acc.balance)} or recorded transactions. Are you sure you want to delete it?`)) {
+      return;
+    }
+  }
+
+  state.accounts = state.accounts.filter(a => a.id !== accId);
+  saveData('accounts');
+
+  renderDashboard();
+  renderSetupAccounts();
+  populateAccountsUI();
+  populateCategorySelects();
+  showToast(`Account "${acc.name}" deleted.`);
 }
 
 function renderSetupCategories() {
