@@ -3,7 +3,8 @@ import os
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
-with open(os.path.join(base_dir, 'index.html'), 'r', encoding='utf-8') as f:
+# Read source template
+with open(os.path.join(base_dir, 'index.modular.html'), 'r', encoding='utf-8') as f:
     html = f.read()
 
 with open(os.path.join(base_dir, 'style.css'), 'r', encoding='utf-8') as f:
@@ -18,11 +19,12 @@ with open(os.path.join(base_dir, 'libs', 'xlsx.full.min.js'), 'r', encoding='utf
 with open(os.path.join(base_dir, 'app.js'), 'r', encoding='utf-8') as f:
     app_js = f.read()
 
-# Inline CSS
+# Inline CSS directly
+html = html.replace('<link rel="stylesheet" href="style.css?v=4.0">', f'<style>\n{css}\n</style>')
 html = html.replace('<link rel="stylesheet" href="style.css?v=3.0">', f'<style>\n{css}\n</style>')
 html = html.replace('<link rel="stylesheet" href="style.css">', f'<style>\n{css}\n</style>')
 
-# Inline JS
+# Inline scripts
 script_replacement = f"""
   <script>
 {chart_js}
@@ -35,8 +37,10 @@ script_replacement = f"""
   </script>
 """
 
-# Replace all external script tags
-for s in ['<script src="libs/chart.umd.min.js?v=3.0"></script>',
+for s in ['<script src="libs/chart.umd.min.js?v=4.0"></script>',
+          '<script src="libs/xlsx.full.min.js?v=4.0"></script>',
+          '<script src="app.js?v=4.0"></script>',
+          '<script src="libs/chart.umd.min.js?v=3.0"></script>',
           '<script src="libs/xlsx.full.min.js?v=3.0"></script>',
           '<script src="app.js?v=3.0"></script>',
           '<script src="libs/chart.umd.min.js"></script>',
@@ -46,8 +50,14 @@ for s in ['<script src="libs/chart.umd.min.js?v=3.0"></script>',
 
 html = html.replace('</body>', f'{script_replacement}\n</body>')
 
-out_path = os.path.join(base_dir, 'financeflow-offline.html')
-with open(out_path, 'w', encoding='utf-8') as f:
+# Write to financeflow-offline.html
+out_offline = os.path.join(base_dir, 'financeflow-offline.html')
+with open(out_offline, 'w', encoding='utf-8') as f:
     f.write(html)
 
-print(f"Created standalone file: {out_path} ({os.path.getsize(out_path):,} bytes)")
+# Write to index.html for direct GitHub Pages deployment
+out_index = os.path.join(base_dir, 'index.html')
+with open(out_index, 'w', encoding='utf-8') as f:
+    f.write(html)
+
+print(f"Generated standalone files successfully! Size: {os.path.getsize(out_index):,} bytes")

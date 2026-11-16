@@ -489,11 +489,12 @@
       <div class="sheet-drag-handle"></div>
       
       <div class="sheet-header">
-        <h2 class="sheet-title">Record Transaction</h2>
+        <h2 class="sheet-title" id="record-modal-title">Record Transaction</h2>
         <button id="close-record-modal-btn" class="ios-close-btn">&times;</button>
       </div>
 
       <form id="record-tx-form" class="sheet-body">
+        <input type="hidden" id="edit-tx-id" value="">
         
         <!-- Transaction Type Switcher: Expense | Income | Transfer -->
         <div class="tx-type-selector">
@@ -589,7 +590,7 @@
 
         <!-- Submit Button -->
         <button type="submit" id="submit-tx-btn" class="ios-btn-primary-large">
-          <span>Save Transaction</span>
+          <span id="record-submit-label">Save Transaction</span>
         </button>
 
       </form>

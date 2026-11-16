@@ -1246,8 +1246,8 @@ html, body {
 }
 
 .ios-bottom-sheet {
-  width: 100%;
-  max-width: 480px;
+  width: calc(100vw - 32px);
+  max-width: 440px;
   margin: auto;
   max-height: 84vh;
   max-height: 84dvh;
@@ -1255,10 +1255,12 @@ html, body {
   border-radius: var(--radius-lg);
   border: 1px solid var(--glass-border);
   box-shadow: 0 15px 50px rgba(0, 0, 0, 0.65);
-  padding: 18px 18px 20px 18px;
+  padding: 16px 16px 20px 16px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  overflow-x: hidden !important;
+  box-sizing: border-box;
   transform: scale(0.92);
   transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1279,6 +1281,8 @@ html, body {
   border-bottom: 1px solid var(--glass-border);
   margin-bottom: 14px;
   flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .sheet-title {
@@ -1304,11 +1308,55 @@ html, body {
 .sheet-body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 13px;
   overflow-y: auto;
+  overflow-x: hidden !important;
   -webkit-overflow-scrolling: touch;
-  padding-right: 4px;
+  padding-right: 2px;
   padding-bottom: 24px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Ensure strictly no horizontal scrolling in record form */
+#record-tx-form * {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.tx-edit-inline-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--glass-border);
+  color: var(--accent-primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.tx-edit-inline-btn:active {
+  background: rgba(59, 130, 246, 0.25);
+  transform: scale(0.95);
+}
+
+.tx-delete-inline-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--glass-border);
+  color: var(--accent-expense);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.tx-delete-inline-btn:active {
+  background: rgba(244, 63, 94, 0.25);
+  transform: scale(0.95);
 }
 
 /* Excel Import Card in Setup */

@@ -727,12 +727,18 @@ function createDateGroupedTxItem(tx) {
     </div>
     <div class="tx-item-right">
       <span class="tx-amount-display ${amtClass}">${sign}${formatCurrency(tx.amount)}</span>
-      <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:2px;">
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:2px;">
         <span class="tx-time-tag">${formatDisplayTime(tx.datetime)}</span>
+        <button class="tx-edit-inline-btn" title="Edit transaction">Edit</button>
         <button class="tx-delete-inline-btn" title="Delete transaction">Delete</button>
       </div>
     </div>
   `;
+
+  item.querySelector('.tx-edit-inline-btn').onclick = (e) => {
+    e.stopPropagation();
+    openRecordModalForEdit(tx.id);
+  };
 
   item.querySelector('.tx-delete-inline-btn').onclick = (e) => {
     e.stopPropagation();
@@ -801,6 +807,78 @@ function addTransaction(txData) {
   return true;
 }
 
+function updateTransaction(editId, newTxData) {
+  const index = state.transactions.findIndex(t => t.id === editId);
+  if (index === -1) return false;
+
+  const oldTx = state.transactions[index];
+  const oldAmount = parseFloat(oldTx.amount) || 0;
+  const newAmount = parseFloat(newTxData.amount);
+
+  if (isNaN(newAmount) || newAmount <= 0) {
+    showToast('Please enter a valid amount.');
+    return false;
+  }
+
+  // 1. Reversal of old transaction balance effect
+  if (oldTx.type === 'expense') {
+    const acc = state.accounts.find(a => a.id === oldTx.accountId);
+    if (acc) acc.balance = (parseFloat(acc.balance) || 0) + oldAmount;
+  } else if (oldTx.type === 'income') {
+    const acc = state.accounts.find(a => a.id === oldTx.accountId);
+    if (acc) acc.balance = (parseFloat(acc.balance) || 0) - oldAmount;
+  } else if (oldTx.type === 'transfer') {
+    const fromAcc = state.accounts.find(a => a.id === oldTx.fromAccountId);
+    const toAcc = state.accounts.find(a => a.id === oldTx.toAccountId);
+    if (fromAcc) fromAcc.balance = (parseFloat(fromAcc.balance) || 0) + oldAmount;
+    if (toAcc) toAcc.balance = (parseFloat(toAcc.balance) || 0) - oldAmount;
+  }
+
+  // 2. Apply new transaction balance effect
+  if (newTxData.type === 'expense') {
+    const acc = state.accounts.find(a => a.id === newTxData.accountId);
+    if (!acc) return false;
+    acc.balance = (parseFloat(acc.balance) || 0) - newAmount;
+  } else if (newTxData.type === 'income') {
+    const acc = state.accounts.find(a => a.id === newTxData.accountId);
+    if (!acc) return false;
+    acc.balance = (parseFloat(acc.balance) || 0) + newAmount;
+  } else if (newTxData.type === 'transfer') {
+    if (newTxData.fromAccountId === newTxData.toAccountId) {
+      showToast('Cannot transfer to the same account.');
+      return false;
+    }
+    const fromAcc = state.accounts.find(a => a.id === newTxData.fromAccountId);
+    const toAcc = state.accounts.find(a => a.id === newTxData.toAccountId);
+    if (!fromAcc || !toAcc) return false;
+
+    fromAcc.balance = (parseFloat(fromAcc.balance) || 0) - newAmount;
+    toAcc.balance = (parseFloat(toAcc.balance) || 0) + newAmount;
+  }
+
+  // 3. Update properties
+  oldTx.type = newTxData.type;
+  oldTx.amount = newAmount;
+  oldTx.category = newTxData.category;
+  oldTx.datetime = newTxData.datetime || getDeviceLocalDateTime();
+  oldTx.accountId = newTxData.accountId || null;
+  oldTx.fromAccountId = newTxData.fromAccountId || null;
+  oldTx.toAccountId = newTxData.toAccountId || null;
+  oldTx.note = (newTxData.note || '').trim();
+
+  saveData('accounts');
+  saveData('transactions');
+
+  renderDashboard();
+  renderTransactionsView();
+  renderStatsView();
+  renderSetupView();
+
+  showToast('Transaction updated!');
+  triggerHapticFeedback();
+  return true;
+}
+
 function deleteTransaction(txId) {
   const index = state.transactions.findIndex(t => t.id === txId);
   if (index === -1) return;
@@ -841,6 +919,15 @@ function openRecordModal(defaultType = 'expense') {
   const form = document.getElementById('record-tx-form');
   form.reset();
 
+  const editInput = document.getElementById('edit-tx-id');
+  if (editInput) editInput.value = '';
+
+  const modalTitle = document.getElementById('record-modal-title');
+  if (modalTitle) modalTitle.textContent = 'Record Transaction';
+
+  const submitLabel = document.getElementById('record-submit-label');
+  if (submitLabel) submitLabel.textContent = 'Save Transaction';
+
   // Set type radio
   const radio = form.querySelector(`input[name="tx-type"][value="${defaultType}"]`);
   if (radio) radio.checked = true;
@@ -856,8 +943,67 @@ function openRecordModal(defaultType = 'expense') {
   document.getElementById('tx-amount').focus();
 }
 
+function openRecordModalForEdit(txId) {
+  const tx = state.transactions.find(t => t.id === txId);
+  if (!tx) return;
+
+  const modal = document.getElementById('record-modal');
+  const form = document.getElementById('record-tx-form');
+  form.reset();
+
+  const editInput = document.getElementById('edit-tx-id');
+  if (editInput) editInput.value = tx.id;
+
+  const modalTitle = document.getElementById('record-modal-title');
+  if (modalTitle) modalTitle.textContent = 'Edit Transaction';
+
+  const submitLabel = document.getElementById('record-submit-label');
+  if (submitLabel) submitLabel.textContent = 'Update Transaction';
+
+  // Select type
+  const radio = form.querySelector(`input[name="tx-type"][value="${tx.type}"]`);
+  if (radio) radio.checked = true;
+
+  updateRecordFormFields(tx.type);
+
+  // Amount
+  document.getElementById('tx-amount').value = tx.amount;
+
+  // Datetime
+  setLiveTimeMode('manual');
+  const timeInput = document.getElementById('tx-datetime');
+  if (tx.datetime) {
+    timeInput.value = tx.datetime.slice(0, 16);
+  }
+
+  // Category
+  populateCategoryDropdown(tx.type, tx.category);
+
+  // Account
+  if (tx.type === 'transfer') {
+    if (tx.fromAccountId) document.getElementById('tx-from-account').value = tx.fromAccountId;
+    if (tx.toAccountId) document.getElementById('tx-to-account').value = tx.toAccountId;
+  } else {
+    if (tx.accountId) document.getElementById('tx-account').value = tx.accountId;
+  }
+
+  // Note
+  document.getElementById('tx-note').value = tx.note || '';
+
+  modal.classList.add('show');
+}
+
 function closeRecordModal() {
   document.getElementById('record-modal').classList.remove('show');
+  const editInput = document.getElementById('edit-tx-id');
+  if (editInput) editInput.value = '';
+
+  const modalTitle = document.getElementById('record-modal-title');
+  if (modalTitle) modalTitle.textContent = 'Record Transaction';
+
+  const submitLabel = document.getElementById('record-submit-label');
+  if (submitLabel) submitLabel.textContent = 'Save Transaction';
+
   clearInterval(state.timeAutoInterval);
 }
 
@@ -1629,7 +1775,14 @@ function setupEventListeners() {
       txPayload.accountId = document.getElementById('tx-account').value;
     }
 
-    const success = addTransaction(txPayload);
+    const editId = document.getElementById('edit-tx-id')?.value;
+    let success = false;
+    if (editId) {
+      success = updateTransaction(editId, txPayload);
+    } else {
+      success = addTransaction(txPayload);
+    }
+
     if (success) {
       closeRecordModal();
     }
