@@ -2575,9 +2575,13 @@ let isCloudSyncing = false;
 
 function normalizeDateTime(val) {
   if (!val) return getDeviceLocalDateTime();
-  if (typeof val === 'string' && val.includes('T') && val.length >= 16) {
+  
+  // If it's already an ISO YYYY-MM-DDTHH:MM format
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(val)) {
     return val.slice(0, 16);
   }
+
+  // Parse Date string (e.g. 'Tue Nov 17 2026 17:36:00 GMT+0530') or timestamp
   const d = new Date(val);
   if (!isNaN(d.getTime())) {
     const y = d.getFullYear();
@@ -2587,6 +2591,7 @@ function normalizeDateTime(val) {
     const min = String(d.getMinutes()).padStart(2, '0');
     return y + '-' + m + '-' + day + 'T' + h + ':' + min;
   }
+
   return getDeviceLocalDateTime();
 }
 
@@ -2733,21 +2738,33 @@ async function loadLiveCloudData(isSilent = false) {
 }
 
 // Send transaction create/update/delete to Cloud Backend
-function sendTransactionToCloud(tx, action = 'add') {
+async function sendTransactionToCloud(tx, action = 'add') {
   const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
   if (!syncUrl) return;
 
-  const url = syncUrl + '?action=' + encodeURIComponent(action)
-    + '&id=' + encodeURIComponent(tx.id || '')
-    + '&amount=' + encodeURIComponent(tx.amount || 0)
-    + '&type=' + encodeURIComponent(tx.type || 'expense')
-    + '&category=' + encodeURIComponent(tx.category || '')
-    + '&account=' + encodeURIComponent(tx.accountId || '')
-    + '&note=' + encodeURIComponent(tx.note || '')
-    + '&datetime=' + encodeURIComponent(tx.datetime || '')
-    + '&timestamp=' + encodeURIComponent(tx.timestamp || Date.now());
+  let url = '';
+  if (action === 'delete') {
+    // Only send action=delete and id, never amount=0 which can trigger add/update
+    url = syncUrl + '?action=delete&id=' + encodeURIComponent(tx.id || '');
+  } else {
+    url = syncUrl + '?action=' + encodeURIComponent(action)
+      + '&id=' + encodeURIComponent(tx.id || '')
+      + '&amount=' + encodeURIComponent(tx.amount || 0)
+      + '&type=' + encodeURIComponent(tx.type || 'expense')
+      + '&category=' + encodeURIComponent(tx.category || '')
+      + '&account=' + encodeURIComponent(tx.accountId || '')
+      + '&note=' + encodeURIComponent(tx.note || '')
+      + '&datetime=' + encodeURIComponent(tx.datetime || '')
+      + '&timestamp=' + encodeURIComponent(tx.timestamp || Date.now());
+  }
 
-  fetch(url, { mode: 'no-cors' }).catch(err => console.warn('Cloud action ' + action + ' error:', err));
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.warn('Cloud action ' + action + ' error:', err);
+  }
 }
 
 async function pushAllLocalTransactionsToCloud() {
