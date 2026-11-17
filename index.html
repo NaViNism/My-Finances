@@ -2612,110 +2612,142 @@ function updateCloudSyncStatus(status, text) {
   if (!badge) return;
   if (status === 'syncing') {
     badge.className = 'badge-status-syncing';
-    badge.textContent = '● Syncing...';
-    if (msg) msg.textContent = text || 'Connecting to Google Sheets...';
+    badge.textContent = '● Connecting...';
+    if (msg) msg.textContent = text || 'Connecting to live database...';
   } else if (status === 'connected') {
     badge.className = 'badge-status-online';
-    badge.textContent = '● Connected';
-    if (msg) msg.textContent = text || 'Synced with Google Sheet';
+    badge.textContent = '● Live Cloud';
+    if (msg) msg.textContent = text || 'Live database connected (All devices in sync)';
   } else {
     badge.className = 'badge-status-offline';
     badge.textContent = '● Offline';
-    if (msg) msg.textContent = text || 'Offline mode (LocalStorage active)';
+    if (msg) msg.textContent = text || 'Offline mode (Using cached data)';
   }
 }
 
-async function syncWithCloud(isManual = false) {
+// Pure Web App: Recalculate all balances deterministically from master transactions
+function recalculateBalancesFromTransactions() {
+  state.accounts.forEach(a => {
+    a.balance = 0.00;
+  });
+
+  state.transactions.forEach(tx => {
+    const amt = parseFloat(tx.amount) || 0;
+    if (isNaN(amt) || amt <= 0) return;
+
+    if (tx.type === 'expense') {
+      const accId = resolveAccountId(tx.accountId);
+      const acc = state.accounts.find(a => a.id === accId);
+      if (acc) acc.balance = (parseFloat(acc.balance) || 0) - amt;
+    } else if (tx.type === 'income') {
+      const accId = resolveAccountId(tx.accountId);
+      const acc = state.accounts.find(a => a.id === accId);
+      if (acc) acc.balance = (parseFloat(acc.balance) || 0) + amt;
+    } else if (tx.type === 'transfer') {
+      const fromId = resolveAccountId(tx.fromAccountId);
+      const toId = resolveAccountId(tx.toAccountId);
+      const fromAcc = state.accounts.find(a => a.id === fromId);
+      const toAcc = state.accounts.find(a => a.id === toId);
+      if (fromAcc) fromAcc.balance = (parseFloat(fromAcc.balance) || 0) - amt;
+      if (toAcc) toAcc.balance = (parseFloat(toAcc.balance) || 0) + amt;
+    }
+  });
+}
+
+// Pure Web App: Fetch Live Data directly from Cloud (Master Database)
+async function loadLiveCloudData(isSilent = false) {
   const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
   if (!syncUrl || isCloudSyncing) return;
   isCloudSyncing = true;
-  updateCloudSyncStatus('syncing', 'Fetching latest transactions...');
 
+  if (!isSilent) {
+    updateCloudSyncStatus('syncing', 'Fetching live database...');
+  }
   const refreshBtn = document.getElementById('force-refresh-btn');
-  if (refreshBtn) refreshBtn.style.animation = 'spin 1s linear infinite';
+  if (refreshBtn && !isSilent) refreshBtn.style.animation = 'spin 1s linear infinite';
 
   try {
     const res = await fetch(syncUrl + '?action=getAll');
     const data = await res.json();
 
     if (data && data.status === 'success' && Array.isArray(data.transactions)) {
-      let newCount = 0;
+      const cloudList = [];
       data.transactions.forEach(cloudTx => {
-        // Exclude dummy test verification transaction if user doesn't want it
+        // Skip dummy 0-amount test or test verifications
         if (cloudTx.category === 'Test' && cloudTx.note === 'Verification') return;
+        const amt = parseFloat(cloudTx.amount);
+        if (isNaN(amt) || amt < 0) return;
 
-        const exists = state.transactions.some(t => t.id === cloudTx.id);
-        if (!exists) {
-          const accId = resolveAccountId(cloudTx.accountId);
-          const normalizedDate = normalizeDateTime(cloudTx.datetime);
-          const amt = parseFloat(cloudTx.amount) || 0;
-          const newTx = {
-            id: String(cloudTx.id || ('tx_' + Date.now())),
-            type: cloudTx.type || 'expense',
-            amount: amt,
-            category: cloudTx.category || 'General',
-            accountId: accId,
-            fromAccountId: null,
-            toAccountId: null,
-            datetime: normalizedDate,
-            note: (cloudTx.note || '').trim(),
-            timestamp: Number(cloudTx.timestamp) || Date.now()
-          };
+        cloudList.push({
+          id: String(cloudTx.id || ('tx_' + Date.now())),
+          type: cloudTx.type || 'expense',
+          amount: amt,
+          category: cloudTx.category || 'General',
+          accountId: resolveAccountId(cloudTx.accountId),
+          fromAccountId: cloudTx.fromAccountId ? resolveAccountId(cloudTx.fromAccountId) : null,
+          toAccountId: cloudTx.toAccountId ? resolveAccountId(cloudTx.toAccountId) : null,
+          datetime: normalizeDateTime(cloudTx.datetime),
+          note: (cloudTx.note || '').trim(),
+          timestamp: Number(cloudTx.timestamp) || Date.now()
+        });
 
-          // Apply balance change
-          const acc = state.accounts.find(a => a.id === accId);
-          if (acc) {
-            if (newTx.type === 'expense') acc.balance = (parseFloat(acc.balance) || 0) - amt;
-            else if (newTx.type === 'income') acc.balance = (parseFloat(acc.balance) || 0) + amt;
-          }
-
-          // Add to category list if not present
-          if (newTx.category && state.categories[newTx.type] && !state.categories[newTx.type].includes(newTx.category)) {
-            state.categories[newTx.type].push(newTx.category);
-          }
-
-          state.transactions.unshift(newTx);
-          newCount++;
+        // Ensure category exists
+        const cat = cloudTx.category;
+        const type = cloudTx.type || 'expense';
+        if (cat && state.categories[type] && !state.categories[type].includes(cat)) {
+          state.categories[type].push(cat);
         }
       });
 
-      if (newCount > 0) {
-        saveData('accounts');
-        saveData('categories');
-        saveData('transactions');
-        renderDashboard();
-        renderTransactionsView();
-        renderStatsView();
-        populateAccountsUI();
-        populateCategorySelects();
-        showToast('☁️ Synced ' + newCount + ' transaction' + (newCount > 1 ? 's' : '') + ' from Google Sheet!');
-      } else if (isManual) {
-        showToast('☁️ All transactions are up to date.');
+      // Sort newest first
+      cloudList.sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
+
+      // Overwrite local transactions with cloud master truth
+      state.transactions = cloudList;
+      recalculateBalancesFromTransactions();
+
+      saveData('accounts');
+      saveData('categories');
+      saveData('transactions');
+
+      renderDashboard();
+      renderTransactionsView();
+      renderStatsView();
+      populateAccountsUI();
+      populateCategorySelects();
+
+      updateCloudSyncStatus('connected', 'Live Cloud: ' + cloudList.length + ' transactions');
+      if (!isSilent) {
+        showToast('☁️ Live cloud data updated (' + cloudList.length + ' records)');
       }
-      updateCloudSyncStatus('connected', 'All transactions synced');
     } else {
-      updateCloudSyncStatus('offline', 'Could not parse cloud data');
+      updateCloudSyncStatus('offline', 'Could not read cloud database');
     }
   } catch (err) {
-    console.warn('Cloud sync error (running offline):', err);
-    updateCloudSyncStatus('offline', 'Running offline');
+    console.warn('Network offline / error:', err);
+    updateCloudSyncStatus('offline', 'Offline (using cached data)');
   } finally {
     isCloudSyncing = false;
     if (refreshBtn) refreshBtn.style.animation = '';
   }
 }
 
-function sendTransactionToCloud(tx) {
+// Send transaction create/update/delete to Cloud Backend
+function sendTransactionToCloud(tx, action = 'add') {
   const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
   if (!syncUrl) return;
-  const url = syncUrl + '?action=add'
-    + '&amount=' + encodeURIComponent(tx.amount)
-    + '&type=' + encodeURIComponent(tx.type)
-    + '&category=' + encodeURIComponent(tx.category)
-    + '&account=' + encodeURIComponent(tx.accountId || '')
-    + '&note=' + encodeURIComponent(tx.note || '');
 
-  fetch(url, { mode: 'no-cors' }).catch(err => console.warn('Background cloud save error:', err));
+  const url = syncUrl + '?action=' + encodeURIComponent(action)
+    + '&id=' + encodeURIComponent(tx.id || '')
+    + '&amount=' + encodeURIComponent(tx.amount || 0)
+    + '&type=' + encodeURIComponent(tx.type || 'expense')
+    + '&category=' + encodeURIComponent(tx.category || '')
+    + '&account=' + encodeURIComponent(tx.accountId || '')
+    + '&note=' + encodeURIComponent(tx.note || '')
+    + '&datetime=' + encodeURIComponent(tx.datetime || '')
+    + '&timestamp=' + encodeURIComponent(tx.timestamp || Date.now());
+
+  fetch(url, { mode: 'no-cors' }).catch(err => console.warn('Cloud action ' + action + ' error:', err));
 }
 
 async function pushAllLocalTransactionsToCloud() {
@@ -2733,17 +2765,12 @@ async function pushAllLocalTransactionsToCloud() {
   try {
     let uploaded = 0;
     for (let tx of state.transactions) {
-      const url = syncUrl + '?action=add'
-        + '&amount=' + encodeURIComponent(tx.amount)
-        + '&type=' + encodeURIComponent(tx.type)
-        + '&category=' + encodeURIComponent(tx.category)
-        + '&account=' + encodeURIComponent(tx.accountId || '')
-        + '&note=' + encodeURIComponent(tx.note || '');
-      await fetch(url, { mode: 'no-cors' });
+      sendTransactionToCloud(tx, 'add');
       uploaded++;
     }
-    showToast('✓ Successfully uploaded ' + uploaded + ' transactions to Google Sheet!');
+    showToast('✓ Uploaded ' + uploaded + ' transactions to Google Sheet!');
     updateCloudSyncStatus('connected', 'Uploaded ' + uploaded + ' transactions');
+    setTimeout(() => loadLiveCloudData(true), 2000);
   } catch (err) {
     console.error('Upload error:', err);
     showToast('Error uploading to cloud.');
@@ -2784,7 +2811,19 @@ document.addEventListener('DOMContentLoaded', () => {
   renderStatsView();
   renderSetupView();
   checkShortcutsQueryParam();
-  syncWithCloud();
+  
+  // Pure Web App: Load Live Cloud Data on start
+  loadLiveCloudData();
+
+  // Pure Web App: Auto-refresh whenever returning to app or switching tabs
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      loadLiveCloudData(true);
+    }
+  });
+  window.addEventListener('focus', () => {
+    loadLiveCloudData(true);
+  });
 
   // Unregister all Service Workers to guarantee live updates on iPhone
   if ('serviceWorker' in navigator) {
