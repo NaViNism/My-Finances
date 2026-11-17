@@ -2181,6 +2181,8 @@ html, body {
               <input type="file" id="import-backup-file" accept=".json" style="display:none;">
             </label>
           </div>
+          <button id="sync-all-to-cloud-btn" class="ios-btn-primary-large mt-3" style="min-height:48px;">☁️ Sync All Data to Cloud Now</button>
+          <button id="check-cloud-health-btn" class="ios-btn-secondary mt-2" style="width:100%;min-height:44px;">🔍 Check Cloud Database Status</button>
           <button id="reset-all-data-btn" class="ios-btn-danger mt-3">Reset All Data to Default</button>
         </div>
 
@@ -2721,6 +2723,14 @@ async function loadLiveCloudData(isSilent = false) {
         });
       }
 
+      // 4. Settings (Currency, Theme)
+      if (data.settings && typeof data.settings === 'object') {
+        state.settings = { ...state.settings, ...data.settings };
+        saveData('settings');
+        updateCurrencyDisplays();
+        applyTheme(state.settings.theme);
+      }
+
       saveData('accounts');
       saveData('categories');
       saveData('transactions');
@@ -2854,7 +2864,14 @@ async function syncAccountsToCloud() {
   }));
   const url = syncUrl + '?action=saveaccounts&data=' + encodeURIComponent(JSON.stringify(accountsPayload));
   try {
-    await fetch(url);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data && data.status === 'ok') {
+      showToast('⚠️ Old Google Apps Script detected. Deploy "New Version" in Google Sheets.');
+    } else if (data && data.status === 'success') {
+      showToast('✓ Accounts & balances saved to Google Sheets!');
+    }
+    return data;
   } catch(err) {
     console.warn('Account sync to cloud error:', err);
   }
@@ -2865,10 +2882,34 @@ async function syncCategoriesToCloud() {
   if (!syncUrl) return;
   const url = syncUrl + '?action=savecategories&data=' + encodeURIComponent(JSON.stringify(state.categories));
   try {
-    await fetch(url);
+    const res = await fetch(url);
+    return await res.json();
   } catch(err) {
     console.warn('Categories sync to cloud error:', err);
   }
+}
+
+async function syncSettingsToCloud() {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl) return;
+  const url = syncUrl + '?action=savesettings&data=' + encodeURIComponent(JSON.stringify(state.settings));
+  try {
+    const res = await fetch(url);
+    return await res.json();
+  } catch(err) {
+    console.warn('Settings sync to cloud error:', err);
+  }
+}
+
+async function syncAllToCloud() {
+  showToast('Syncing all data (accounts, categories, settings, txs) to Google Sheets...');
+  await syncAccountsToCloud();
+  await syncCategoriesToCloud();
+  await syncSettingsToCloud();
+  if (state.transactions.length > 0) {
+    await uploadTransactionsParallel(state.transactions);
+  }
+  showToast('✓ All data successfully synced to cloud!');
 }
 
 
@@ -4438,6 +4479,7 @@ function deleteAccount(accId) {
 
   renderDashboard();
   renderSetupAccounts();
+  renderTransactionsView();
   populateAccountsUI();
   populateCategorySelects();
   showToast(`Account "${acc.name}" deleted.`);
@@ -4775,6 +4817,7 @@ function setupEventListeners() {
     saveData('accounts');
     renderDashboard();
     renderSetupAccounts();
+    renderTransactionsView();
     populateAccountsUI();
     populateCategorySelects();
     closeAccountModal();
@@ -4820,11 +4863,13 @@ function setupEventListeners() {
     renderTransactionsView();
     renderStatsView();
     renderSetupView();
-    showToast('Currency updated');
+    syncSettingsToCloud();
+    showToast('✓ Currency updated & synced to cloud!');
   });
 
   document.getElementById('pref-theme').addEventListener('change', (e) => {
     applyTheme(e.target.value);
+    syncSettingsToCloud();
   });
 
   document.getElementById('theme-toggle-btn').addEventListener('click', () => {
@@ -4868,6 +4913,28 @@ function setupEventListeners() {
   document.getElementById('export-backup-btn').addEventListener('click', exportJsonBackup);
   document.getElementById('import-backup-file').addEventListener('change', importJsonBackup);
   document.getElementById('reset-all-data-btn').addEventListener('click', resetAllData);
+
+  const syncAllBtn = document.getElementById('sync-all-to-cloud-btn');
+  if (syncAllBtn) syncAllBtn.addEventListener('click', syncAllToCloud);
+
+  const checkHealthBtn = document.getElementById('check-cloud-health-btn');
+  if (checkHealthBtn) {
+    checkHealthBtn.addEventListener('click', async () => {
+      const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+      showToast('Testing cloud connection...');
+      try {
+        const res = await fetch(syncUrl + '?action=test');
+        const data = await res.json();
+        if (data && data.version === '2.0') {
+          showToast('✅ Cloud is running v2.0! Multi-Sheet Accounts & Balances active.');
+        } else {
+          showToast('⚠️ Old Google Apps Script detected! Please Deploy -> New Version in Google Sheets.');
+        }
+      } catch(e) {
+        showToast('❌ Could not reach Google Apps Script. Check connection.');
+      }
+    });
+  }
 
   // Test Shortcut Button
   document.getElementById('test-shortcut-btn').addEventListener('click', () => {
