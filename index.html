@@ -2675,49 +2675,50 @@ async function loadLiveCloudData(isSilent = false) {
     const res = await fetch(syncUrl + '?action=getAll');
     const data = await res.json();
 
-    if (data && data.status === 'success' && Array.isArray(data.transactions)) {
-      const cloudList = [];
-      data.transactions.forEach(cloudTx => {
-        // Skip dummy 0-amount test or test verifications
-        if (cloudTx.category === 'Test' && cloudTx.note === 'Verification') return;
-        const amt = parseFloat(cloudTx.amount);
-        if (isNaN(amt) || amt < 0) return;
+    if (data && data.status === 'success') {
+      // 1. Transactions
+      if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+        const cloudList = [];
+        data.transactions.forEach(cloudTx => {
+          if (cloudTx.category === 'Test' && cloudTx.note === 'Verification') return;
+          const amt = parseFloat(cloudTx.amount);
+          if (isNaN(amt) || amt < 0) return;
 
-        cloudList.push({
-          id: String(cloudTx.id || ('tx_' + Date.now())),
-          type: cloudTx.type || 'expense',
-          amount: amt,
-          category: cloudTx.category || 'General',
-          accountId: resolveAccountId(cloudTx.accountId),
-          fromAccountId: cloudTx.fromAccountId ? resolveAccountId(cloudTx.fromAccountId) : null,
-          toAccountId: cloudTx.toAccountId ? resolveAccountId(cloudTx.toAccountId) : null,
-          datetime: normalizeDateTime(cloudTx.datetime),
-          note: (cloudTx.note || '').trim(),
-          timestamp: Number(cloudTx.timestamp) || Date.now()
+          cloudList.push({
+            id: String(cloudTx.id || ('tx_' + Date.now())),
+            type: cloudTx.type || 'expense',
+            amount: amt,
+            category: cloudTx.category || 'General',
+            accountId: resolveAccountId(cloudTx.accountId),
+            fromAccountId: cloudTx.fromAccountId ? resolveAccountId(cloudTx.fromAccountId) : null,
+            toAccountId: cloudTx.toAccountId ? resolveAccountId(cloudTx.toAccountId) : null,
+            datetime: normalizeDateTime(cloudTx.datetime),
+            note: (cloudTx.note || '').trim(),
+            timestamp: Number(cloudTx.timestamp) || Date.now()
+          });
         });
 
-        // Ensure category exists
-        const cat = cloudTx.category;
-        const type = cloudTx.type || 'expense';
-        if (cat && state.categories[type] && !state.categories[type].includes(cat)) {
-          state.categories[type].push(cat);
-        }
-      });
-
-      // Sort newest first
-      cloudList.sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
-
-      // Overwrite local transactions with cloud master truth if cloud has data
-      if (cloudList.length > 0) {
+        cloudList.sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
         state.transactions = cloudList;
-        recalculateBalancesFromTransactions();
-      } else if (state.transactions.length > 0) {
-        // Cloud is empty, but local has data: preserve local data and show prompt to upload
-        console.log('Local transactions preserved while cloud is empty.');
-        updateCloudSyncStatus('connected', state.transactions.length + ' local transactions ready to upload');
-      } else {
-        state.transactions = [];
-        recalculateBalancesFromTransactions();
+      }
+
+      // 2. Accounts (Names, Balances, Custom 3rd accounts)
+      if (Array.isArray(data.accounts) && data.accounts.length > 0) {
+        state.accounts = data.accounts.map(a => ({
+          id: String(a.id),
+          name: String(a.name),
+          type: String(a.type || 'bank'),
+          balance: parseFloat(a.balance) || 0
+        }));
+      }
+
+      // 3. Categories
+      if (data.categories && typeof data.categories === 'object') {
+        ['expense', 'income', 'transfer'].forEach(t => {
+          if (Array.isArray(data.categories[t]) && data.categories[t].length > 0) {
+            state.categories[t] = data.categories[t];
+          }
+        });
       }
 
       saveData('accounts');
@@ -2727,12 +2728,13 @@ async function loadLiveCloudData(isSilent = false) {
       renderDashboard();
       renderTransactionsView();
       renderStatsView();
+      renderSetupView();
       populateAccountsUI();
       populateCategorySelects();
 
-      updateCloudSyncStatus('connected', 'Live Cloud: ' + cloudList.length + ' transactions');
+      updateCloudSyncStatus('connected', 'Live Cloud: ' + state.transactions.length + ' txs, ' + state.accounts.length + ' accounts');
       if (!isSilent) {
-        showToast('☁️ Live cloud data updated (' + cloudList.length + ' records)');
+        showToast('☁️ Live cloud database synchronized!');
       }
     } else {
       updateCloudSyncStatus('offline', 'Could not read cloud database');
@@ -2840,6 +2842,35 @@ async function pushAllLocalTransactionsToCloud() {
     isCloudSyncing = false;
   }
 }
+
+async function syncAccountsToCloud() {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl) return;
+  const accountsPayload = state.accounts.map(a => ({
+    id: a.id,
+    name: a.name,
+    type: a.type || 'bank',
+    balance: parseFloat(a.balance) || 0
+  }));
+  const url = syncUrl + '?action=saveaccounts&data=' + encodeURIComponent(JSON.stringify(accountsPayload));
+  try {
+    await fetch(url);
+  } catch(err) {
+    console.warn('Account sync to cloud error:', err);
+  }
+}
+
+async function syncCategoriesToCloud() {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl) return;
+  const url = syncUrl + '?action=savecategories&data=' + encodeURIComponent(JSON.stringify(state.categories));
+  try {
+    await fetch(url);
+  } catch(err) {
+    console.warn('Categories sync to cloud error:', err);
+  }
+}
+
 
 // ================= APP STATE =================
 let state = {
@@ -3122,6 +3153,9 @@ function handleExcelImport(event) {
       await uploadTransactionsParallel(allImportedTxs, (done, total) => {
         statusEl.textContent = `Saving to Google Sheet: ${done} of ${total} transactions...`;
       });
+
+      await syncAccountsToCloud();
+      await syncCategoriesToCloud();
 
       statusEl.className = 'import-status-text success';
       statusEl.textContent = `✓ Successfully imported and saved ${allImportedTxs.length} transactions to Google Sheet!`;
@@ -3611,6 +3645,7 @@ function addTransaction(txData) {
   saveData('accounts');
   saveData('transactions');
   sendTransactionToCloud(newTx);
+  syncAccountsToCloud();
 
   renderDashboard();
   renderTransactionsView();
@@ -3681,7 +3716,6 @@ function updateTransaction(editId, newTxData) {
   oldTx.toAccountId = newTxData.toAccountId || null;
   oldTx.note = (newTxData.note || '').trim();
 
-  recalculateBalancesFromTransactions();
   saveData('accounts');
   saveData('transactions');
 
@@ -3691,17 +3725,19 @@ function updateTransaction(editId, newTxData) {
   renderSetupView();
 
   sendTransactionToCloud(oldTx, 'update');
+  syncAccountsToCloud();
   showToast('✓ Transaction updated in cloud & all devices!');
   triggerHapticFeedback();
   return true;
 }
 
-function deleteTransaction(txId) {
+async function deleteTransaction(txId) {
   const index = state.transactions.findIndex(t => t.id === txId);
   if (index === -1) return;
 
   const tx = state.transactions[index];
   const amount = parseFloat(tx.amount) || 0;
+  const deletedId = tx.id;
 
   // Reversal of account balances
   if (tx.type === 'expense') {
@@ -3727,7 +3763,15 @@ function deleteTransaction(txId) {
   renderStatsView();
   renderSetupView();
 
-  showToast('Transaction deleted and balance restored.');
+  showToast('Deleting from cloud...');
+
+  try {
+    await sendTransactionToCloud({ id: deletedId }, 'delete');
+    await syncAccountsToCloud();
+    showToast('✓ Deleted from cloud & balances updated on all devices!');
+  } catch(err) {
+    console.warn('Delete cloud error:', err);
+  }
 }
 
 // ================= RECORD MODAL DYNAMICS =================
@@ -3934,6 +3978,7 @@ function handleInlineCategoryAdd() {
   if (!state.categories[activeType].includes(catName)) {
     state.categories[activeType].push(catName);
     saveData('categories');
+    syncCategoriesToCloud();
   }
 
   // Refresh dropdown and select this category
@@ -4389,6 +4434,7 @@ function deleteAccount(accId) {
 
   state.accounts = state.accounts.filter(a => a.id !== accId);
   saveData('accounts');
+  syncAccountsToCloud();
 
   renderDashboard();
   renderSetupAccounts();
@@ -4422,7 +4468,8 @@ function deleteCategory(type, index) {
   saveData('categories');
   renderSetupCategories();
   populateCategorySelects();
-  showToast('Category removed.');
+  syncCategoriesToCloud();
+  showToast('✓ Category removed from cloud and all devices.');
 }
 
 function openAccountEditModal(accId) {
@@ -4605,6 +4652,7 @@ function setupEventListeners() {
       if (!state.categories[type].includes(category)) {
         state.categories[type].push(category);
         saveData('categories');
+        syncCategoriesToCloud();
       }
     }
 
@@ -4727,9 +4775,13 @@ function setupEventListeners() {
     saveData('accounts');
     renderDashboard();
     renderSetupAccounts();
+    populateAccountsUI();
     populateCategorySelects();
     closeAccountModal();
-    showToast('Account updated!');
+    showToast('Saving account to cloud...');
+
+    syncAccountsToCloud();
+    showToast('✓ Account & balance saved to cloud and all devices!');
   });
 
   // Setup Category Sub-tabs
@@ -4752,7 +4804,8 @@ function setupEventListeners() {
       input.value = '';
       renderSetupCategories();
       populateCategorySelects();
-      showToast(`Category "${val}" added!`);
+      syncCategoriesToCloud();
+      showToast(`✓ Category "${val}" added and synced to cloud!`);
     } else {
       showToast('Category already exists.');
     }
@@ -4908,7 +4961,10 @@ function importJsonBackup(event) {
         renderTransactionsView();
         renderStatsView();
         renderSetupView();
-        showToast('Backup restored successfully!');
+        syncAccountsToCloud();
+        syncCategoriesToCloud();
+        uploadTransactionsParallel(state.transactions);
+        showToast('Backup restored & synced to cloud!');
       } else {
         showToast('Invalid backup file structure.');
       }
@@ -4937,6 +4993,8 @@ async function resetAllData() {
     state.accounts = JSON.parse(JSON.stringify(DEFAULT_ACCOUNTS));
     recalculateBalancesFromTransactions();
     saveData();
+    await syncAccountsToCloud();
+    await syncCategoriesToCloud();
 
     renderDashboard();
     renderTransactionsView();
