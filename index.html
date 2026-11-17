@@ -2570,6 +2570,188 @@ function getLocalDateString(d) {
   return y + '-' + m + '-' + day;
 }
 
+const DEFAULT_CLOUD_URL = 'https://script.google.com/macros/s/AKfycbxVCpgScGC0vlKKKyXCSN2pVGxIu8tBNlGOh8wh-FLVCDrm5bnnWwMGUwex3vmd02F8/exec';
+let isCloudSyncing = false;
+
+function normalizeDateTime(val) {
+  if (!val) return getDeviceLocalDateTime();
+  if (typeof val === 'string' && val.includes('T') && val.length >= 16) {
+    return val.slice(0, 16);
+  }
+  const d = new Date(val);
+  if (!isNaN(d.getTime())) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return y + '-' + m + '-' + day + 'T' + h + ':' + min;
+  }
+  return getDeviceLocalDateTime();
+}
+
+function resolveAccountId(accountStr) {
+  if (!accountStr) return state.accounts[0]?.id || 'acc_sbi';
+  const clean = String(accountStr).trim().toLowerCase();
+  if (clean.includes('sbi') || clean === 'acc_sbi' || clean.includes('bank 1') || clean.includes('bank acc 1')) {
+    return 'acc_sbi';
+  }
+  if (clean.includes('equitas') || clean === 'acc_bank2' || clean.includes('bank 2') || clean.includes('bank acc 2')) {
+    return 'acc_bank2';
+  }
+  if (clean.includes('cash') || clean === 'acc_cash') {
+    return 'acc_cash';
+  }
+  const found = state.accounts.find(a => a.id.toLowerCase() === clean || a.name.toLowerCase().includes(clean));
+  return found ? found.id : (state.accounts[0]?.id || 'acc_sbi');
+}
+
+function updateCloudSyncStatus(status, text) {
+  const badge = document.getElementById('cloud-sync-badge');
+  const msg = document.getElementById('cloud-sync-status-msg');
+  if (!badge) return;
+  if (status === 'syncing') {
+    badge.className = 'badge-status-syncing';
+    badge.textContent = '● Syncing...';
+    if (msg) msg.textContent = text || 'Connecting to Google Sheets...';
+  } else if (status === 'connected') {
+    badge.className = 'badge-status-online';
+    badge.textContent = '● Connected';
+    if (msg) msg.textContent = text || 'Synced with Google Sheet';
+  } else {
+    badge.className = 'badge-status-offline';
+    badge.textContent = '● Offline';
+    if (msg) msg.textContent = text || 'Offline mode (LocalStorage active)';
+  }
+}
+
+async function syncWithCloud(isManual = false) {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl || isCloudSyncing) return;
+  isCloudSyncing = true;
+  updateCloudSyncStatus('syncing', 'Fetching latest transactions...');
+
+  const refreshBtn = document.getElementById('force-refresh-btn');
+  if (refreshBtn) refreshBtn.style.animation = 'spin 1s linear infinite';
+
+  try {
+    const res = await fetch(syncUrl + '?action=getAll');
+    const data = await res.json();
+
+    if (data && data.status === 'success' && Array.isArray(data.transactions)) {
+      let newCount = 0;
+      data.transactions.forEach(cloudTx => {
+        // Exclude dummy test verification transaction if user doesn't want it
+        if (cloudTx.category === 'Test' && cloudTx.note === 'Verification') return;
+
+        const exists = state.transactions.some(t => t.id === cloudTx.id);
+        if (!exists) {
+          const accId = resolveAccountId(cloudTx.accountId);
+          const normalizedDate = normalizeDateTime(cloudTx.datetime);
+          const amt = parseFloat(cloudTx.amount) || 0;
+          const newTx = {
+            id: String(cloudTx.id || ('tx_' + Date.now())),
+            type: cloudTx.type || 'expense',
+            amount: amt,
+            category: cloudTx.category || 'General',
+            accountId: accId,
+            fromAccountId: null,
+            toAccountId: null,
+            datetime: normalizedDate,
+            note: (cloudTx.note || '').trim(),
+            timestamp: Number(cloudTx.timestamp) || Date.now()
+          };
+
+          // Apply balance change
+          const acc = state.accounts.find(a => a.id === accId);
+          if (acc) {
+            if (newTx.type === 'expense') acc.balance = (parseFloat(acc.balance) || 0) - amt;
+            else if (newTx.type === 'income') acc.balance = (parseFloat(acc.balance) || 0) + amt;
+          }
+
+          // Add to category list if not present
+          if (newTx.category && state.categories[newTx.type] && !state.categories[newTx.type].includes(newTx.category)) {
+            state.categories[newTx.type].push(newTx.category);
+          }
+
+          state.transactions.unshift(newTx);
+          newCount++;
+        }
+      });
+
+      if (newCount > 0) {
+        saveData('accounts');
+        saveData('categories');
+        saveData('transactions');
+        renderDashboard();
+        renderTransactionsView();
+        renderStatsView();
+        populateAccountsUI();
+        populateCategorySelects();
+        showToast('☁️ Synced ' + newCount + ' transaction' + (newCount > 1 ? 's' : '') + ' from Google Sheet!');
+      } else if (isManual) {
+        showToast('☁️ All transactions are up to date.');
+      }
+      updateCloudSyncStatus('connected', 'All transactions synced');
+    } else {
+      updateCloudSyncStatus('offline', 'Could not parse cloud data');
+    }
+  } catch (err) {
+    console.warn('Cloud sync error (running offline):', err);
+    updateCloudSyncStatus('offline', 'Running offline');
+  } finally {
+    isCloudSyncing = false;
+    if (refreshBtn) refreshBtn.style.animation = '';
+  }
+}
+
+function sendTransactionToCloud(tx) {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl) return;
+  const url = syncUrl + '?action=add'
+    + '&amount=' + encodeURIComponent(tx.amount)
+    + '&type=' + encodeURIComponent(tx.type)
+    + '&category=' + encodeURIComponent(tx.category)
+    + '&account=' + encodeURIComponent(tx.accountId || '')
+    + '&note=' + encodeURIComponent(tx.note || '');
+
+  fetch(url, { mode: 'no-cors' }).catch(err => console.warn('Background cloud save error:', err));
+}
+
+async function pushAllLocalTransactionsToCloud() {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl || isCloudSyncing) return;
+  if (state.transactions.length === 0) {
+    showToast('No local transactions to upload.');
+    return;
+  }
+
+  isCloudSyncing = true;
+  updateCloudSyncStatus('syncing', 'Uploading local data...');
+  showToast('Uploading ' + state.transactions.length + ' transactions to Google Sheets...');
+
+  try {
+    let uploaded = 0;
+    for (let tx of state.transactions) {
+      const url = syncUrl + '?action=add'
+        + '&amount=' + encodeURIComponent(tx.amount)
+        + '&type=' + encodeURIComponent(tx.type)
+        + '&category=' + encodeURIComponent(tx.category)
+        + '&account=' + encodeURIComponent(tx.accountId || '')
+        + '&note=' + encodeURIComponent(tx.note || '');
+      await fetch(url, { mode: 'no-cors' });
+      uploaded++;
+    }
+    showToast('✓ Successfully uploaded ' + uploaded + ' transactions to Google Sheet!');
+    updateCloudSyncStatus('connected', 'Uploaded ' + uploaded + ' transactions');
+  } catch (err) {
+    console.error('Upload error:', err);
+    showToast('Error uploading to cloud.');
+  } finally {
+    isCloudSyncing = false;
+  }
+}
+
 // ================= APP STATE =================
 let state = {
   accounts: [],
@@ -2602,6 +2784,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderStatsView();
   renderSetupView();
   checkShortcutsQueryParam();
+  syncWithCloud();
 
   // Unregister all Service Workers to guarantee live updates on iPhone
   if ('serviceWorker' in navigator) {
@@ -3359,6 +3542,7 @@ function addTransaction(txData) {
 
   saveData('accounts');
   saveData('transactions');
+  sendTransactionToCloud(newTx);
 
   renderDashboard();
   renderTransactionsView();
@@ -4272,6 +4456,7 @@ function checkShortcutsQueryParam() {
     } else {
       // Open modal pre-populated
       openRecordModal(type);
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
   }
 }
