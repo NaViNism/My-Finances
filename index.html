@@ -2632,10 +2632,10 @@ function updateCloudSyncStatus(status, text) {
   }
 }
 
-// Pure Web App: Recalculate all balances deterministically from master transactions
+// Pure Web App: Recalculate all balances deterministically from master transactions + initialBalance
 function recalculateBalancesFromTransactions() {
   state.accounts.forEach(a => {
-    a.balance = 0.00;
+    a.balance = parseFloat(a.initialBalance) || 0.00;
   });
 
   state.transactions.forEach(tx => {
@@ -2706,13 +2706,20 @@ async function loadLiveCloudData(isSilent = false) {
 
       // 2. Accounts (Names, Balances, Custom 3rd accounts)
       if (Array.isArray(data.accounts) && data.accounts.length > 0) {
-        state.accounts = data.accounts.map(a => ({
-          id: String(a.id),
-          name: String(a.name),
-          type: String(a.type || 'bank'),
-          balance: parseFloat(a.balance) || 0
-        }));
+        state.accounts = data.accounts.map(a => {
+          const existing = state.accounts.find(ex => ex.id === a.id);
+          return {
+            id: String(a.id),
+            name: String(a.name),
+            type: String(a.type || 'bank'),
+            initialBalance: parseFloat(a.initialBalance !== undefined ? a.initialBalance : (existing?.initialBalance || 0)) || 0,
+            balance: parseFloat(a.balance) || (existing?.balance || 0)
+          };
+        });
       }
+
+      // 3. Compute live balances from master transactions
+      recalculateBalancesFromTransactions();
 
       // 3. Categories
       if (data.categories && typeof data.categories === 'object') {
@@ -2860,6 +2867,7 @@ async function syncAccountsToCloud() {
     id: a.id,
     name: a.name,
     type: a.type || 'bank',
+    initialBalance: parseFloat(a.initialBalance) || 0,
     balance: parseFloat(a.balance) || 0
   }));
   const url = syncUrl + '?action=saveaccounts&data=' + encodeURIComponent(JSON.stringify(accountsPayload));
@@ -2999,6 +3007,8 @@ function loadStoredData() {
       });
       saveData('accounts');
       saveData('transactions');
+    } else {
+      recalculateBalancesFromTransactions();
     }
 
     const set = localStorage.getItem(STORAGE_KEYS.SETTINGS);
@@ -3645,28 +3655,6 @@ function addTransaction(txData) {
     return false;
   }
 
-  // Update Account Balances
-  if (txData.type === 'expense') {
-    const acc = state.accounts.find(a => a.id === txData.accountId);
-    if (!acc) return false;
-    acc.balance = (parseFloat(acc.balance) || 0) - amount;
-  } else if (txData.type === 'income') {
-    const acc = state.accounts.find(a => a.id === txData.accountId);
-    if (!acc) return false;
-    acc.balance = (parseFloat(acc.balance) || 0) + amount;
-  } else if (txData.type === 'transfer') {
-    if (txData.fromAccountId === txData.toAccountId) {
-      showToast('Cannot transfer to the same account.');
-      return false;
-    }
-    const fromAcc = state.accounts.find(a => a.id === txData.fromAccountId);
-    const toAcc = state.accounts.find(a => a.id === txData.toAccountId);
-    if (!fromAcc || !toAcc) return false;
-
-    fromAcc.balance = (parseFloat(fromAcc.balance) || 0) - amount;
-    toAcc.balance = (parseFloat(toAcc.balance) || 0) + amount;
-  }
-
   // Create new transaction object
   const newTx = {
     id: 'tx_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
@@ -3682,6 +3670,7 @@ function addTransaction(txData) {
   };
 
   state.transactions.unshift(newTx);
+  recalculateBalancesFromTransactions();
 
   saveData('accounts');
   saveData('transactions');
@@ -3711,43 +3700,7 @@ function updateTransaction(editId, newTxData) {
     return false;
   }
 
-  // 1. Reversal of old transaction balance effect
-  if (oldTx.type === 'expense') {
-    const acc = state.accounts.find(a => a.id === oldTx.accountId);
-    if (acc) acc.balance = (parseFloat(acc.balance) || 0) + oldAmount;
-  } else if (oldTx.type === 'income') {
-    const acc = state.accounts.find(a => a.id === oldTx.accountId);
-    if (acc) acc.balance = (parseFloat(acc.balance) || 0) - oldAmount;
-  } else if (oldTx.type === 'transfer') {
-    const fromAcc = state.accounts.find(a => a.id === oldTx.fromAccountId);
-    const toAcc = state.accounts.find(a => a.id === oldTx.toAccountId);
-    if (fromAcc) fromAcc.balance = (parseFloat(fromAcc.balance) || 0) + oldAmount;
-    if (toAcc) toAcc.balance = (parseFloat(toAcc.balance) || 0) - oldAmount;
-  }
-
-  // 2. Apply new transaction balance effect
-  if (newTxData.type === 'expense') {
-    const acc = state.accounts.find(a => a.id === newTxData.accountId);
-    if (!acc) return false;
-    acc.balance = (parseFloat(acc.balance) || 0) - newAmount;
-  } else if (newTxData.type === 'income') {
-    const acc = state.accounts.find(a => a.id === newTxData.accountId);
-    if (!acc) return false;
-    acc.balance = (parseFloat(acc.balance) || 0) + newAmount;
-  } else if (newTxData.type === 'transfer') {
-    if (newTxData.fromAccountId === newTxData.toAccountId) {
-      showToast('Cannot transfer to the same account.');
-      return false;
-    }
-    const fromAcc = state.accounts.find(a => a.id === newTxData.fromAccountId);
-    const toAcc = state.accounts.find(a => a.id === newTxData.toAccountId);
-    if (!fromAcc || !toAcc) return false;
-
-    fromAcc.balance = (parseFloat(fromAcc.balance) || 0) - newAmount;
-    toAcc.balance = (parseFloat(toAcc.balance) || 0) + newAmount;
-  }
-
-  // 3. Update properties
+  // Update properties
   oldTx.type = newTxData.type;
   oldTx.amount = newAmount;
   oldTx.category = newTxData.category;
@@ -3757,6 +3710,7 @@ function updateTransaction(editId, newTxData) {
   oldTx.toAccountId = newTxData.toAccountId || null;
   oldTx.note = (newTxData.note || '').trim();
 
+  recalculateBalancesFromTransactions();
   saveData('accounts');
   saveData('transactions');
 
@@ -3780,21 +3734,8 @@ async function deleteTransaction(txId) {
   const amount = parseFloat(tx.amount) || 0;
   const deletedId = tx.id;
 
-  // Reversal of account balances
-  if (tx.type === 'expense') {
-    const acc = state.accounts.find(a => a.id === tx.accountId);
-    if (acc) acc.balance = (parseFloat(acc.balance) || 0) + amount;
-  } else if (tx.type === 'income') {
-    const acc = state.accounts.find(a => a.id === tx.accountId);
-    if (acc) acc.balance = (parseFloat(acc.balance) || 0) - amount;
-  } else if (tx.type === 'transfer') {
-    const fromAcc = state.accounts.find(a => a.id === tx.fromAccountId);
-    const toAcc = state.accounts.find(a => a.id === tx.toAccountId);
-    if (fromAcc) fromAcc.balance = (parseFloat(fromAcc.balance) || 0) + amount;
-    if (toAcc) toAcc.balance = (parseFloat(toAcc.balance) || 0) - amount;
-  }
-
   state.transactions.splice(index, 1);
+  recalculateBalancesFromTransactions();
 
   saveData('accounts');
   saveData('transactions');
@@ -4793,7 +4734,7 @@ function setupEventListeners() {
     e.preventDefault();
     const id = document.getElementById('edit-account-id').value;
     const name = document.getElementById('account-name-input').value.trim();
-    const balance = parseFloat(document.getElementById('account-balance-input').value) || 0;
+    const targetBalance = parseFloat(document.getElementById('account-balance-input').value) || 0;
     const type = document.getElementById('account-type-select').value;
 
     if (!name) return;
@@ -4802,18 +4743,35 @@ function setupEventListeners() {
       const acc = state.accounts.find(a => a.id === id);
       if (acc) {
         acc.name = name;
-        acc.balance = balance;
         acc.type = type;
+        // Calculate sum of all transactions for this account
+        let txSum = 0;
+        state.transactions.forEach(tx => {
+          const amt = parseFloat(tx.amount) || 0;
+          if (isNaN(amt) || amt <= 0) return;
+          if (tx.type === 'expense' && resolveAccountId(tx.accountId) === id) txSum -= amt;
+          else if (tx.type === 'income' && resolveAccountId(tx.accountId) === id) txSum += amt;
+          else if (tx.type === 'transfer') {
+            if (resolveAccountId(tx.fromAccountId) === id) txSum -= amt;
+            if (resolveAccountId(tx.toAccountId) === id) txSum += amt;
+          }
+        });
+        // initialBalance is the baseline offset so that initialBalance + txSum = targetBalance
+        acc.initialBalance = targetBalance - txSum;
+        acc.balance = targetBalance;
       }
     } else {
+      const newId = 'acc_' + Date.now();
       state.accounts.push({
-        id: 'acc_' + Date.now(),
+        id: newId,
         name,
-        balance,
+        initialBalance: targetBalance,
+        balance: targetBalance,
         type
       });
     }
 
+    recalculateBalancesFromTransactions();
     saveData('accounts');
     renderDashboard();
     renderSetupAccounts();
