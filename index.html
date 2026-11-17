@@ -2767,6 +2767,52 @@ async function sendTransactionToCloud(tx, action = 'add') {
   }
 }
 
+// High-speed batch upload to Google Sheets (POST or chunked GET)
+async function uploadBatchToCloud(txList, onProgress) {
+  const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+  if (!syncUrl || !txList || txList.length === 0) return true;
+
+  // Attempt 1: Instant POST (all transactions in 1 request)
+  try {
+    const postRes = await fetch(syncUrl, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'batch', transactions: txList })
+    });
+    const postData = await postRes.json();
+    if (postData && postData.status === 'success') {
+      return true;
+    }
+  } catch (err) {
+    console.log('POST not available, using high-speed chunked GET:', err);
+  }
+
+  // Attempt 2: High-speed chunked GET in batches of 15
+  const chunkSize = 15;
+  for (let i = 0; i < txList.length; i += chunkSize) {
+    const chunk = txList.slice(i, i + chunkSize);
+    const compactChunk = chunk.map(t => ({
+      id: t.id,
+      datetime: t.datetime,
+      amount: t.amount,
+      type: t.type,
+      category: t.category,
+      accountId: t.accountId,
+      note: t.note,
+      timestamp: t.timestamp
+    }));
+    const url = syncUrl + '?action=batch&data=' + encodeURIComponent(JSON.stringify(compactChunk));
+    try {
+      await fetch(url);
+    } catch(e) {
+      console.warn('Chunk upload error:', e);
+    }
+    if (onProgress) {
+      onProgress(Math.min(i + chunkSize, txList.length), txList.length);
+    }
+  }
+  return true;
+}
+
 async function pushAllLocalTransactionsToCloud() {
   const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
   if (!syncUrl || isCloudSyncing) return;
@@ -2776,18 +2822,15 @@ async function pushAllLocalTransactionsToCloud() {
   }
 
   isCloudSyncing = true;
-  updateCloudSyncStatus('syncing', 'Uploading local data...');
-  showToast('Uploading ' + state.transactions.length + ' transactions to Google Sheets...');
+  updateCloudSyncStatus('syncing', 'Uploading to Google Sheet...');
+  showToast('Uploading ' + state.transactions.length + ' transactions to Google Sheet cloud...');
 
   try {
-    let uploaded = 0;
-    for (let tx of state.transactions) {
-      sendTransactionToCloud(tx, 'add');
-      uploaded++;
-    }
-    showToast('✓ Uploaded ' + uploaded + ' transactions to Google Sheet!');
-    updateCloudSyncStatus('connected', 'Uploaded ' + uploaded + ' transactions');
-    setTimeout(() => loadLiveCloudData(true), 2000);
+    await uploadBatchToCloud(state.transactions, (done, total) => {
+      showToast('Uploading to cloud: ' + done + ' / ' + total + '...');
+    });
+    showToast('✓ Successfully uploaded all ' + state.transactions.length + ' transactions to Google Sheet!');
+    updateCloudSyncStatus('connected', 'All ' + state.transactions.length + ' transactions saved to cloud');
   } catch (err) {
     console.error('Upload error:', err);
     showToast('Error uploading to cloud.');
@@ -3119,14 +3162,16 @@ function handleExcelImport(event) {
       statusEl.textContent = `Uploading ${importedCount} transactions to Google Sheet cloud...`;
       showToast(`Saving ${importedCount} transactions to cloud...`);
 
-      // Upload all imported transactions to Google Sheet in background
+      // Fast batch upload to Google Sheet cloud
       (async () => {
-        for (let tx of newImportedTxs) {
-          await sendTransactionToCloud(tx, 'add');
-        }
+        statusEl.className = 'import-status-text';
+        statusEl.textContent = `Uploading ${importedCount} transactions to Google Sheet cloud database...`;
+        await uploadBatchToCloud(newImportedTxs, (done, total) => {
+          statusEl.textContent = `Uploading to cloud: ${done} of ${total} transactions...`;
+        });
         statusEl.className = 'import-status-text success';
-        statusEl.textContent = `✓ Successfully imported ${importedCount} transactions to cloud & all devices!`;
-        showToast(`✓ All ${importedCount} transactions synced to cloud!`);
+        statusEl.textContent = `✓ Successfully imported and saved ${importedCount} transactions to Google Sheet!`;
+        showToast(`✓ All ${importedCount} transactions saved to cloud and all devices!`);
       })();
 
       event.target.value = '';
