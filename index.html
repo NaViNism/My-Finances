@@ -2968,6 +2968,7 @@ function handleExcelImport(event) {
 
       let importedCount = 0;
       let skippedCount = 0;
+      const newImportedTxs = [];
 
       rawRows.forEach((row, idx) => {
         // Case-insensitive key lookup helper
@@ -3083,7 +3084,7 @@ function handleExcelImport(event) {
         }
 
         // 8. Add transaction object
-        state.transactions.push({
+        const newImpTx = {
           id: 'tx_imp_' + Date.now() + '_' + idx + '_' + Math.floor(Math.random() * 1000),
           type: txType,
           amount: amount,
@@ -3094,26 +3095,39 @@ function handleExcelImport(event) {
           toAccountId: txType === 'transfer' ? (state.accounts.find(a => a.id !== targetAccountId)?.id || null) : null,
           note: noteRaw,
           timestamp: new Date(datetimeStr).getTime() || Date.now()
-        });
+        };
 
+        newImportedTxs.push(newImpTx);
+        state.transactions.push(newImpTx);
         importedCount++;
       });
 
-      // Save updated data
+      // Recalculate and save updated data
+      recalculateBalancesFromTransactions();
       saveData('accounts');
       saveData('categories');
       saveData('transactions');
 
-      // Update UI
+      // Update UI immediately
       renderDashboard();
       renderTransactionsView();
       renderStatsView();
       renderSetupView();
       populateAccountsUI();
 
-      statusEl.className = 'import-status-text success';
-      statusEl.textContent = `✓ Successfully imported ${importedCount} transactions! Balances updated.`;
-      showToast(`Imported ${importedCount} transactions!`);
+      statusEl.className = 'import-status-text';
+      statusEl.textContent = `Uploading ${importedCount} transactions to Google Sheet cloud...`;
+      showToast(`Saving ${importedCount} transactions to cloud...`);
+
+      // Upload all imported transactions to Google Sheet in background
+      (async () => {
+        for (let tx of newImportedTxs) {
+          await sendTransactionToCloud(tx, 'add');
+        }
+        statusEl.className = 'import-status-text success';
+        statusEl.textContent = `✓ Successfully imported ${importedCount} transactions to cloud & all devices!`;
+        showToast(`✓ All ${importedCount} transactions synced to cloud!`);
+      })();
 
       event.target.value = '';
     } catch (err) {
@@ -3669,6 +3683,7 @@ function updateTransaction(editId, newTxData) {
   oldTx.toAccountId = newTxData.toAccountId || null;
   oldTx.note = (newTxData.note || '').trim();
 
+  recalculateBalancesFromTransactions();
   saveData('accounts');
   saveData('transactions');
 
@@ -3677,7 +3692,8 @@ function updateTransaction(editId, newTxData) {
   renderStatsView();
   renderSetupView();
 
-  showToast('Transaction updated!');
+  sendTransactionToCloud(oldTx, 'update');
+  showToast('✓ Transaction updated in cloud & all devices!');
   triggerHapticFeedback();
   return true;
 }
@@ -4905,17 +4921,32 @@ function importJsonBackup(event) {
   reader.readAsText(file);
 }
 
-function resetAllData() {
-  if (confirm('Are you sure you want to reset all accounts and transactions? This cannot be undone.')) {
+async function resetAllData() {
+  if (confirm('Are you sure you want to delete ALL transactions across all devices and reset your Google Sheet? This cannot be undone.')) {
+    const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
+    showToast('Wiping all data from Google Sheet...');
+
+    try {
+      if (syncUrl) {
+        await fetch(syncUrl + '?action=clearAll');
+      }
+    } catch(err) {
+      console.warn('Clear cloud error:', err);
+    }
+
     localStorage.clear();
-    loadStoredData();
-    applyTheme(state.settings.theme);
-    updateCurrencyDisplays();
+    state.transactions = [];
+    state.accounts = JSON.parse(JSON.stringify(DEFAULT_ACCOUNTS));
+    recalculateBalancesFromTransactions();
+    saveData();
+
     renderDashboard();
     renderTransactionsView();
     renderStatsView();
     renderSetupView();
-    showToast('All data reset to initial defaults.');
+    populateAccountsUI();
+
+    showToast('✓ All data wiped from cloud and all devices reset to zero!');
   }
 }
 
