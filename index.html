@@ -2707,9 +2707,18 @@ async function loadLiveCloudData(isSilent = false) {
       // Sort newest first
       cloudList.sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
 
-      // Overwrite local transactions with cloud master truth
-      state.transactions = cloudList;
-      recalculateBalancesFromTransactions();
+      // Overwrite local transactions with cloud master truth if cloud has data
+      if (cloudList.length > 0) {
+        state.transactions = cloudList;
+        recalculateBalancesFromTransactions();
+      } else if (state.transactions.length > 0) {
+        // Cloud is empty, but local has data: preserve local data and show prompt to upload
+        console.log('Local transactions preserved while cloud is empty.');
+        updateCloudSyncStatus('connected', state.transactions.length + ' local transactions ready to upload');
+      } else {
+        state.transactions = [];
+        recalculateBalancesFromTransactions();
+      }
 
       saveData('accounts');
       saveData('categories');
@@ -2767,49 +2776,36 @@ async function sendTransactionToCloud(tx, action = 'add') {
   }
 }
 
-// High-speed batch upload to Google Sheets (POST or chunked GET)
-async function uploadBatchToCloud(txList, onProgress) {
+// Reliable parallel uploader using action=add (5 at a time in parallel)
+async function uploadTransactionsParallel(txList, onProgress) {
   const syncUrl = state.settings.cloudSyncUrl || DEFAULT_CLOUD_URL;
   if (!syncUrl || !txList || txList.length === 0) return true;
 
-  // Attempt 1: Instant POST (all transactions in 1 request)
-  try {
-    const postRes = await fetch(syncUrl, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'batch', transactions: txList })
-    });
-    const postData = await postRes.json();
-    if (postData && postData.status === 'success') {
-      return true;
-    }
-  } catch (err) {
-    console.log('POST not available, using high-speed chunked GET:', err);
+  isCloudSyncing = true;
+  const batchSize = 5;
+  let completed = 0;
+
+  for (let i = 0; i < txList.length; i += batchSize) {
+    const batch = txList.slice(i, i + batchSize);
+    await Promise.all(batch.map(tx => {
+      const url = syncUrl + '?action=add'
+        + '&id=' + encodeURIComponent(tx.id || '')
+        + '&amount=' + encodeURIComponent(tx.amount || 0)
+        + '&type=' + encodeURIComponent(tx.type || 'expense')
+        + '&category=' + encodeURIComponent(tx.category || 'General')
+        + '&account=' + encodeURIComponent(tx.accountId || '')
+        + '&note=' + encodeURIComponent(tx.note || '')
+        + '&datetime=' + encodeURIComponent(tx.datetime || '')
+        + '&timestamp=' + encodeURIComponent(tx.timestamp || Date.now());
+
+      return fetch(url).catch(err => console.warn('Item upload warning:', err));
+    }));
+
+    completed += batch.length;
+    if (onProgress) onProgress(Math.min(completed, txList.length), txList.length);
   }
 
-  // Attempt 2: High-speed chunked GET in batches of 15
-  const chunkSize = 15;
-  for (let i = 0; i < txList.length; i += chunkSize) {
-    const chunk = txList.slice(i, i + chunkSize);
-    const compactChunk = chunk.map(t => ({
-      id: t.id,
-      datetime: t.datetime,
-      amount: t.amount,
-      type: t.type,
-      category: t.category,
-      accountId: t.accountId,
-      note: t.note,
-      timestamp: t.timestamp
-    }));
-    const url = syncUrl + '?action=batch&data=' + encodeURIComponent(JSON.stringify(compactChunk));
-    try {
-      await fetch(url);
-    } catch(e) {
-      console.warn('Chunk upload error:', e);
-    }
-    if (onProgress) {
-      onProgress(Math.min(i + chunkSize, txList.length), txList.length);
-    }
-  }
+  isCloudSyncing = false;
   return true;
 }
 
@@ -2821,12 +2817,18 @@ async function pushAllLocalTransactionsToCloud() {
     return;
   }
 
-  isCloudSyncing = true;
-  updateCloudSyncStatus('syncing', 'Uploading to Google Sheet...');
+  const badge = document.getElementById('cloud-sync-badge');
+  const msg = document.getElementById('cloud-sync-status-msg');
+  if (badge) {
+    badge.className = 'badge-status-syncing';
+    badge.textContent = '● Uploading...';
+  }
+
   showToast('Uploading ' + state.transactions.length + ' transactions to Google Sheet cloud...');
 
   try {
-    await uploadBatchToCloud(state.transactions, (done, total) => {
+    await uploadTransactionsParallel(state.transactions, (done, total) => {
+      if (msg) msg.textContent = 'Uploading to cloud: ' + done + ' of ' + total + '...';
       showToast('Uploading to cloud: ' + done + ' / ' + total + '...');
     });
     showToast('✓ Successfully uploaded all ' + state.transactions.length + ' transactions to Google Sheet!');
@@ -2985,10 +2987,10 @@ function handleExcelImport(event) {
   const statusEl = document.getElementById('import-excel-status');
   statusEl.className = 'import-status-text';
   statusEl.classList.remove('hidden');
-  statusEl.textContent = 'Reading and importing Excel sheet...';
+  statusEl.textContent = 'Reading and importing Excel workbook...';
 
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = async function(e) {
     try {
       const data = new Uint8Array(e.target.result);
       const workbook = XLSX.read(data, { type: 'array', cellDates: true });
@@ -2999,180 +3001,131 @@ function handleExcelImport(event) {
         return;
       }
 
-      // Read rows from the first sheet
-      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rawRows = XLSX.utils.sheet_to_json(worksheet, { defval: '', raw: false });
+      const allImportedTxs = [];
+      let totalSkipped = 0;
 
-      if (!rawRows || rawRows.length === 0) {
+      // Scan ALL sheets in the workbook (Income, Expense, Transfer, Sheet1, etc.)
+      workbook.SheetNames.forEach(sheetName => {
+        const worksheet = workbook.Sheets[sheetName];
+        if (!worksheet) return;
+
+        const rawRows = XLSX.utils.sheet_to_json(worksheet, { defval: '', raw: false });
+        if (!rawRows || rawRows.length === 0) return;
+
+        const lowerSheet = sheetName.toLowerCase();
+        let defaultTypeFromSheet = 'expense';
+        if (lowerSheet.includes('inc')) defaultTypeFromSheet = 'income';
+        else if (lowerSheet.includes('trans')) defaultTypeFromSheet = 'transfer';
+
+        rawRows.forEach(row => {
+          const getCol = (...keys) => {
+            for (let k of keys) {
+              const rowKey = Object.keys(row).find(rk => rk.trim().toLowerCase() === k.trim().toLowerCase());
+              if (rowKey && row[rowKey] !== undefined && row[rowKey] !== '') return String(row[rowKey]).trim();
+            }
+            return '';
+          };
+
+          // 1. Period / Date
+          const periodRaw = getCol('Period', 'Date', 'Transaction Date', 'Txn Date', 'Time', 'Timestamp', 'When', 'Day');
+          if (!periodRaw) {
+            totalSkipped++;
+            return;
+          }
+
+          let datetimeStr = '';
+          const parsedDate = parseExcelDate(periodRaw);
+          if (parsedDate && !isNaN(parsedDate.getTime())) {
+            const y = parsedDate.getFullYear();
+            const m = String(parsedDate.getMonth() + 1).padStart(2, '0');
+            const d = String(parsedDate.getDate()).padStart(2, '0');
+            datetimeStr = `${y}-${m}-${d}T09:00`;
+          } else {
+            datetimeStr = `${getLocalDateString()}T09:00`;
+          }
+
+          // 2. Amount: INR / Amount / Total / Debit / Credit
+          const amountRaw = getCol('INR', 'Amount', 'Total', 'Debit', 'Credit', 'Cost', 'Price', 'Value', 'Rupees', 'Rs');
+          const cleanAmtStr = String(amountRaw).replace(/[^0-9.-]/g, '');
+          const amount = Math.abs(parseFloat(cleanAmtStr));
+          if (isNaN(amount) || amount === 0) {
+            totalSkipped++;
+            return;
+          }
+
+          // 3. Type: Income / Expense / Transfer
+          const typeRaw = getCol('Income/Expense', 'Type', 'Transaction Type', 'Flow', 'Dr/Cr').toLowerCase();
+          let txType = defaultTypeFromSheet;
+          if (typeRaw.includes('inc') || typeRaw === 'income' || typeRaw === 'cr') {
+            txType = 'income';
+          } else if (typeRaw.includes('trans') || typeRaw === 'transfer') {
+            txType = 'transfer';
+          } else if (typeRaw.includes('exp') || typeRaw === 'expense' || typeRaw === 'dr') {
+            txType = 'expense';
+          }
+
+          // 4. Accounts: Account name (SBI, Equitas, Cash, etc.)
+          const accNameRaw = getCol('Accounts', 'Account', 'Bank', 'Method', 'Wallet', 'Paid Via');
+          const targetAccountId = resolveAccountId(accNameRaw);
+
+          // 5. Category
+          let categoryRaw = getCol('Category', 'Categories', 'Particulars', 'Head', 'Tag') || 'General';
+          if (!state.categories[txType]) state.categories[txType] = [];
+          if (!state.categories[txType].includes(categoryRaw)) {
+            state.categories[txType].push(categoryRaw);
+          }
+
+          // 6. Note
+          const noteRaw = getCol('Note', 'Notes', 'Description', 'Remarks', 'Narration', 'Memo');
+
+          allImportedTxs.push({
+            id: 'tx_imp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+            type: txType,
+            amount: amount,
+            datetime: datetimeStr,
+            category: categoryRaw,
+            accountId: targetAccountId,
+            fromAccountId: txType === 'transfer' ? targetAccountId : null,
+            toAccountId: txType === 'transfer' ? (state.accounts.find(a => a.id !== targetAccountId)?.id || null) : null,
+            note: noteRaw,
+            timestamp: new Date(datetimeStr).getTime() || Date.now()
+          });
+        });
+      });
+
+      if (allImportedTxs.length === 0) {
         statusEl.className = 'import-status-text error';
-        statusEl.textContent = 'Excel sheet is empty or contains no valid rows.';
+        statusEl.textContent = 'No valid rows found. Please ensure your Excel sheet has columns for Date/Period and Amount/INR.';
         return;
       }
 
-      let importedCount = 0;
-      let skippedCount = 0;
-      const newImportedTxs = [];
+      // Add to local state immediately
+      allImportedTxs.forEach(tx => state.transactions.push(tx));
+      state.transactions.sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
 
-      rawRows.forEach((row, idx) => {
-        // Case-insensitive key lookup helper
-        const getCol = (...keys) => {
-          for (let k of keys) {
-            const rowKey = Object.keys(row).find(rk => rk.trim().toLowerCase() === k.trim().toLowerCase());
-            if (rowKey && row[rowKey] !== undefined && row[rowKey] !== '') return row[rowKey];
-          }
-          return '';
-        };
-
-        // 1. Period -> Date (set time to 9:00 AM)
-        const periodRaw = getCol('Period', 'Date', 'Transaction Date');
-        if (!periodRaw) {
-          skippedCount++;
-          return;
-        }
-
-        let datetimeStr = '';
-        const parsedDate = parseExcelDate(periodRaw);
-        if (parsedDate && !isNaN(parsedDate.getTime())) {
-          const y = parsedDate.getFullYear();
-          const m = String(parsedDate.getMonth() + 1).padStart(2, '0');
-          const d = String(parsedDate.getDate()).padStart(2, '0');
-          // Specified by user: "Period has only date in it and for that time put 9 am only"
-          datetimeStr = `${y}-${m}-${d}T09:00`;
-        } else {
-          const today = getLocalDateString();
-          datetimeStr = `${today}T09:00`;
-        }
-
-        // 2. Amount: INR -> fallback to Amount
-        const amountRaw = getCol('INR', 'Amount', 'Total');
-        const cleanAmtStr = String(amountRaw).replace(/[^0-9.-]/g, '');
-        const amount = Math.abs(parseFloat(cleanAmtStr));
-        if (isNaN(amount) || amount === 0) {
-          skippedCount++;
-          return;
-        }
-
-        // 3. Type: Income/Expense
-        const typeRaw = String(getCol('Income/Expense', 'Type', 'Transaction Type')).toLowerCase().trim();
-        let txType = 'expense';
-        if (typeRaw.includes('inc') || typeRaw === 'income') {
-          txType = 'income';
-        } else if (typeRaw.includes('trans') || typeRaw === 'transfer') {
-          txType = 'transfer';
-        } else {
-          txType = 'expense';
-        }
-
-        // 4. Accounts: Account name (SBI, Equitas / Bank 2, Cash, etc.)
-        const accNameRaw = String(getCol('Accounts', 'Account')).trim();
-        let targetAccountId = state.accounts[0]?.id || 'acc_sbi';
-
-        if (accNameRaw) {
-          const lower = accNameRaw.toLowerCase();
-          let matchAcc = null;
-
-          // Priority matching for Equitas, SBI, and Cash
-          if (lower.includes('equitas') || lower.includes('bank 2') || lower.includes('bank acc 2') || lower.includes('acc 2')) {
-            matchAcc = state.accounts.find(a => a.id === 'acc_bank2' || a.name.toLowerCase().includes('equitas') || a.name.toLowerCase().includes('bank 2'));
-          } else if (lower.includes('sbi') || lower.includes('bank 1') || lower.includes('bank acc 1') || lower.includes('acc 1')) {
-            matchAcc = state.accounts.find(a => a.id === 'acc_sbi' || a.name.toLowerCase().includes('sbi') || a.name.toLowerCase().includes('bank 1'));
-          } else if (lower.includes('cash')) {
-            matchAcc = state.accounts.find(a => a.id === 'acc_cash' || a.name.toLowerCase().includes('cash'));
-          }
-
-          if (!matchAcc) {
-            matchAcc = state.accounts.find(a => 
-              a.name.toLowerCase() === lower ||
-              a.name.toLowerCase().includes(lower) ||
-              lower.includes(a.name.toLowerCase())
-            );
-          }
-
-          if (!matchAcc) {
-            const newAccId = 'acc_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-            matchAcc = {
-              id: newAccId,
-              name: accNameRaw,
-              type: lower.includes('cash') ? 'cash' : 'bank',
-              balance: 0.00
-            };
-            state.accounts.push(matchAcc);
-          }
-          targetAccountId = matchAcc.id;
-        }
-
-        // 5. Category: Category
-        let categoryRaw = String(getCol('Category')).trim() || 'General';
-        if (!state.categories[txType].includes(categoryRaw)) {
-          state.categories[txType].push(categoryRaw);
-        }
-
-        // 6. Note: Note (fallback to Description)
-        const noteRaw = String(getCol('Note', 'Description')).trim();
-
-        // 7. Update Balances in real time
-        if (txType === 'expense') {
-          const acc = state.accounts.find(a => a.id === targetAccountId);
-          if (acc) acc.balance = (parseFloat(acc.balance) || 0) - amount;
-        } else if (txType === 'income') {
-          const acc = state.accounts.find(a => a.id === targetAccountId);
-          if (acc) acc.balance = (parseFloat(acc.balance) || 0) + amount;
-        } else if (txType === 'transfer') {
-          const fromAcc = state.accounts.find(a => a.id === targetAccountId);
-          const toAcc = state.accounts.find(a => a.id !== targetAccountId) || state.accounts[0];
-          if (fromAcc && toAcc && fromAcc.id !== toAcc.id) {
-            fromAcc.balance = (parseFloat(fromAcc.balance) || 0) - amount;
-            toAcc.balance = (parseFloat(toAcc.balance) || 0) + amount;
-          }
-        }
-
-        // 8. Add transaction object
-        const newImpTx = {
-          id: 'tx_imp_' + Date.now() + '_' + idx + '_' + Math.floor(Math.random() * 1000),
-          type: txType,
-          amount: amount,
-          datetime: datetimeStr,
-          category: categoryRaw,
-          accountId: targetAccountId,
-          fromAccountId: txType === 'transfer' ? targetAccountId : null,
-          toAccountId: txType === 'transfer' ? (state.accounts.find(a => a.id !== targetAccountId)?.id || null) : null,
-          note: noteRaw,
-          timestamp: new Date(datetimeStr).getTime() || Date.now()
-        };
-
-        newImportedTxs.push(newImpTx);
-        state.transactions.push(newImpTx);
-        importedCount++;
-      });
-
-      // Recalculate and save updated data
       recalculateBalancesFromTransactions();
       saveData('accounts');
       saveData('categories');
       saveData('transactions');
 
-      // Update UI immediately
       renderDashboard();
       renderTransactionsView();
       renderStatsView();
       renderSetupView();
       populateAccountsUI();
 
+      // Upload to Google Sheet in parallel batches
       statusEl.className = 'import-status-text';
-      statusEl.textContent = `Uploading ${importedCount} transactions to Google Sheet cloud...`;
-      showToast(`Saving ${importedCount} transactions to cloud...`);
+      statusEl.textContent = `Saving ${allImportedTxs.length} transactions to Google Sheet cloud database...`;
+      showToast(`Uploading ${allImportedTxs.length} records to cloud...`);
 
-      // Fast batch upload to Google Sheet cloud
-      (async () => {
-        statusEl.className = 'import-status-text';
-        statusEl.textContent = `Uploading ${importedCount} transactions to Google Sheet cloud database...`;
-        await uploadBatchToCloud(newImportedTxs, (done, total) => {
-          statusEl.textContent = `Uploading to cloud: ${done} of ${total} transactions...`;
-        });
-        statusEl.className = 'import-status-text success';
-        statusEl.textContent = `✓ Successfully imported and saved ${importedCount} transactions to Google Sheet!`;
-        showToast(`✓ All ${importedCount} transactions saved to cloud and all devices!`);
-      })();
+      await uploadTransactionsParallel(allImportedTxs, (done, total) => {
+        statusEl.textContent = `Saving to Google Sheet: ${done} of ${total} transactions...`;
+      });
+
+      statusEl.className = 'import-status-text success';
+      statusEl.textContent = `✓ Successfully imported and saved ${allImportedTxs.length} transactions to Google Sheet!`;
+      showToast(`✓ All ${allImportedTxs.length} transactions saved to cloud and all devices!`);
 
       event.target.value = '';
     } catch (err) {
